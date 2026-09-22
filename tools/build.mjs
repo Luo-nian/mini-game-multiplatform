@@ -25,6 +25,8 @@ const ENTRY_ORDER = [
   'src/core/adapter/wx.js',
   'src/core/adapter/tt.js',
   'src/core/adapter/web.js',
+  'src/data/levels.js',
+  'src/core/rush.js',
   'src/core/game.js',
   'src/config.js',
   'src/main.js',
