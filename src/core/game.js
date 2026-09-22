@@ -62,6 +62,13 @@
     this.solvedT = 0;
     this.lastTs = 0;
     this.sinceAd = 0;
+    this.lastPointer = null;
+    this._result = null;
+
+    // 动画状态
+    this.tweens = []; // [{carId, fx, fy, tx, ty, t, dur}] 松手吸附补间（格坐标）
+    this.passT = 0;   // 过关驶出动画进度（秒）
+    this.stars = 0;   // 本关星级 1~3
 
     // 棋盘几何
     this.margin = 40;
@@ -110,10 +117,23 @@
     this.hintT = 0;
     this.state = 'playing';
     this.solvedT = 0;
+    this.tweens = [];
+    this.passT = 0;
+    this.stars = 0;
     this.ad.storage.set('mg_level', String(level));
     if (level > this.best) {
       this.best = level;
       this.ad.storage.set('mg_best_level', String(level));
+    }
+    // 新手引导：只在第一次玩第 1 关时触发，免费给一步提示 + 文案
+    if (level === 1 && !this.ad.storage.get('mg_tut')) {
+      var h = MG.rush.hint(this.board);
+      if (h) {
+        this.hint = h;
+        this.hintT = 6;
+      }
+      this._toast('拖开挡路的车，让红车开到出口');
+      this.ad.storage.set('mg_tut', '1');
     }
   };
 
@@ -123,11 +143,14 @@
 
   // ---------- 坐标换算 ----------
 
-  Game.prototype._carRect = function (car) {
+  /** 车辆矩形。gx/gy 是视觉格位（可小数），缺省用数据位 */
+  Game.prototype._carRect = function (car, gx, gy) {
     var cs = this.cell;
+    var vx = gx === undefined ? car.x : gx;
+    var vy = gy === undefined ? car.y : gy;
     var pad = cs * 0.09;
-    var x = this.boardX + car.x * cs + pad;
-    var y = this.boardY + car.y * cs + pad;
+    var x = this.boardX + vx * cs + pad;
+    var y = this.boardY + vy * cs + pad;
     var w = (car.dir === 'h' ? car.len * cs : cs) - pad * 2;
     var h = (car.dir === 'v' ? car.len * cs : cs) - pad * 2;
     return { x: x, y: y, w: w, h: h };
@@ -154,17 +177,32 @@
 
   // ---------- 输入 ----------
 
+  /** 音效统一入口（config 可关） */
+  Game.prototype._sfx = function (name) {
+    if (this.cfg.sfx === false) return;
+    if (this.ad.sfx) this.ad.sfx(name);
+  };
+
   Game.prototype.onPointer = function (p) {
     var i;
+    // 记录最近一次原始输入，调试时画在屏幕上
+    this.lastPointer = { x: p.x, y: p.y, type: p.type };
+    this._result = null;
+
     // 按钮优先
     if (p.type === 'up' || p.type === 'down') {
       for (i = 0; i < this.btns.length; i++) {
         var b = this.btns[i];
         if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
-          if (p.type === 'down' && b.enabled !== false) b.action();
+          // 置灰按钮必须直接跳过，不能「命中即 return」——
+          // 否则它会吃掉落在自己范围内的点击，表现为「点旁边那个能点的按钮却毫无反应」
+          if (b.enabled === false) continue;
+          this._result = 'hit-btn';
+          if (p.type === 'down') b.action();
           return;
         }
       }
+      this._result = 'miss-btn';
     }
 
     if (this.state === 'ready') {
@@ -182,54 +220,107 @@
         carId: car.id,
         sx: p.x,
         sy: p.y,
+        baseX: car.x,
+        baseY: car.y,
+        dx: 0,
+        dy: 0,
         // 上限在按下时按「起点位置」算一次：拖拽过程中车辆位置会变，
         // 若每帧重算会得到相对新位置的上限，导致拖过头又弹回来。
         maxUp: MG.rush.maxSlide(this.board, car.id, -1),
         maxDown: MG.rush.maxSlide(this.board, car.id, 1),
-        applied: 0,
+        snap: 0, // 已越过的格数（用于越格震动反馈）
         dir: car.dir,
       };
       this.hint = null;
       this.hintT = 0;
+      this._sfx('tap');
       return;
     }
 
     if (p.type === 'move' && this.drag) {
       var d = this.drag;
-      var raw = d.dir === 'h' ? (p.x - d.sx) / this.cell : (p.y - d.sy) / this.cell;
-      var want = Math.round(raw);
-      if (want > d.maxDown) want = d.maxDown;
-      if (want < -d.maxUp) want = -d.maxUp;
-
-      var diff = want - d.applied;
-      if (diff !== 0) {
-        var stepDir = diff > 0 ? 1 : -1;
-        var moved = MG.rush.move(this.board, d.carId, diff);
-        d.applied += moved * stepDir;
-        if (moved > 0) {
-          this.ad.vibrate();
-          this._afterMove();
-        }
+      // 跟手：视觉偏移直接跟随手指（像素），数据位不动，松手才结算
+      var raw = d.dir === 'h' ? p.x - d.sx : p.y - d.sy;
+      var cell = this.cell;
+      var minPx = -d.maxUp * cell;
+      var maxPx = d.maxDown * cell;
+      if (raw < minPx) raw = minPx;
+      if (raw > maxPx) raw = maxPx;
+      if (d.dir === 'h') {
+        d.dx = raw;
+        d.dy = 0;
+      } else {
+        d.dx = 0;
+        d.dy = raw;
+      }
+      var gridNow = Math.round(raw / cell);
+      if (gridNow !== d.snap) {
+        d.snap = gridNow;
+        this.ad.vibrate();
       }
       return;
     }
 
     if (p.type === 'up' && this.drag) {
-      if (this.drag.applied !== 0) this.moves += 1;
+      var d2 = this.drag;
+      var cell2 = this.cell;
+      var delta = Math.round((d2.dir === 'h' ? d2.dx : d2.dy) / cell2);
+      if (delta > d2.maxDown) delta = d2.maxDown;
+      if (delta < -d2.maxUp) delta = -d2.maxUp;
+
+      var moved = 0;
+      if (delta !== 0) {
+        moved = MG.rush.move(this.board, d2.carId, delta);
+      }
+
+      // 吸附补间：从「视觉位置」滑到「最终数据位」。move 可能实际走得比 delta 少
+      //（理论上 clamp 后不会，但保险起见以实际 moved 为准），tween 终点跟着修正。
+      // 同一辆车的旧补间作废（快速连拖场景）
+      for (var ti = this.tweens.length - 1; ti >= 0; ti--) {
+        if (this.tweens[ti].carId === d2.carId) this.tweens.splice(ti, 1);
+      }
+      this.tweens.push({
+        carId: d2.carId,
+        fx: d2.baseX + (d2.dir === 'h' ? d2.dx / cell2 : 0),
+        fy: d2.baseY + (d2.dir === 'v' ? d2.dy / cell2 : 0),
+        tx: d2.baseX + (d2.dir === 'h' ? moved : 0),
+        ty: d2.baseY + (d2.dir === 'v' ? moved : 0),
+        t: 0,
+        dur: 0.09,
+      });
+      // 同一辆车的旧补间作废
+      this.tweens = this.tweens.filter(function (t, idx, arr) {
+        return !(t.carId === d2.carId && arr.indexOf(t) !== idx);
+      });
+
       this.drag = null;
-      this._afterMove();
+      if (delta !== 0) {
+        this.moves += 1;
+        this._sfx('slide');
+        this._afterMove();
+      }
     }
   };
 
   Game.prototype._afterMove = function () {
     if (this.state === 'playing' && MG.rush.isSolved(this.board)) {
       this.state = 'solved';
-      this.solvedT = 0;
+      this.passT = 0;
       this.sinceAd += 1;
+      // 星级：最少步数内 = 3 星；多 2 步内 = 2 星；其余 1 星
+      if (this.moves <= this.minSteps) this.stars = 3;
+      else if (this.moves <= this.minSteps + 2) this.stars = 2;
+      else this.stars = 1;
+      this._sfx('pass');
+      if (this.stars === 3) this._sfx('star');
       if (this.sinceAd >= 3) {
         this.sinceAd = 0;
         var id = this.cfg.adUnits && this.cfg.adUnits[this.ad.name + 'Interstitial'];
-        this.ad.showInterstitial(id);
+        var ad = this.ad;
+        // 插屏延迟到驶出动画后弹，避免打断高光时刻
+        setTimeout(function () {
+          ad.showInterstitial(id);
+        }, 900);
       }
     }
   };
@@ -260,12 +351,45 @@
   // ---------- 循环 ----------
 
   Game.prototype.update = function (dt) {
+    var i;
     if (this.hintT > 0) this.hintT = Math.max(0, this.hintT - dt);
     if (this.toast) {
       this.toast.t -= dt;
       if (this.toast.t <= 0) this.toast = null;
     }
-    if (this.state === 'solved') this.solvedT += dt;
+    // 吸附补间推进
+    for (i = this.tweens.length - 1; i >= 0; i--) {
+      var tw = this.tweens[i];
+      tw.t += dt / tw.dur;
+      if (tw.t >= 1) this.tweens.splice(i, 1);
+    }
+    if (this.state === 'solved') {
+      this.solvedT += dt;
+      this.passT += dt;
+    }
+  };
+
+  /**
+   * 车辆的「视觉格位」（小数）：渲染用，与数据位（board 里的整数）分离。
+   * 优先级：拖拽跟手 > 吸附补间 > 数据位。
+   */
+  Game.prototype._carVisual = function (car) {
+    var d = this.drag;
+    if (d && d.carId === car.id) {
+      return {
+        gx: d.baseX + (d.dir === 'h' ? d.dx / this.cell : 0),
+        gy: d.baseY + (d.dir === 'v' ? d.dy / this.cell : 0),
+      };
+    }
+    for (var i = 0; i < this.tweens.length; i++) {
+      var tw = this.tweens[i];
+      if (tw.carId === car.id) {
+        // easeOut：先快后慢，吸附手感
+        var k = 1 - Math.pow(1 - Math.min(tw.t, 1), 3);
+        return { gx: tw.fx + (tw.tx - tw.fx) * k, gy: tw.fy + (tw.ty - tw.fy) * k };
+      }
+    }
+    return { gx: car.x, gy: car.y };
   };
 
   // ---------- 渲染 ----------
@@ -297,6 +421,41 @@
       ctx.fillStyle = '#FFFFFF';
       ctx.font = '400 28px sans-serif';
       ctx.fillText(this.toast.text, w / 2, h - 213);
+    }
+
+    if (this.cfg.debug) this._renderDebug();
+  };
+
+  /** 调试层：把关键信息画在屏幕上，替代 Console（真机上也能看） */
+  Game.prototype._renderDebug = function () {
+    var ctx = this.ctx;
+    var info = this.ad.getSystemInfo();
+    var lines = [
+      'platform=' + this.ad.name +
+        '  canvas=' + (this.ad.getCanvas ? (this.ad.getCanvas() || {}).width : '?') + 'x' + (this.ad.getCanvas ? (this.ad.getCanvas() || {}).height : '?'),
+      'css=' + info.width.toFixed(0) + 'x' + info.height.toFixed(0) +
+        '  dpr=' + info.dpr + '  scale=' + (this.ad._scale ? this.ad._scale.toFixed(3) : '1') +
+        '  virtual=' + this.vw + 'x' + this.vh.toFixed(0),
+      'state=' + this.state + '  level=' + this.level + '  moves=' + this.moves + '  cars=' + (this.board ? this.board.cars.length : 0),
+      'tap=' + (this.lastPointer
+        ? this.lastPointer.type + ' ' + this.lastPointer.x.toFixed(0) + ',' + this.lastPointer.y.toFixed(0) + '  ' + (this._result || '')
+        : 'none'),
+      'btn=' + (this.btns.length
+        ? this.btns.map(function (b) { return b.x.toFixed(0) + ',' + b.y.toFixed(0) + ' ' + b.w + 'x' + b.h; }).join(' | ')
+        : 'none'),
+      'selftest=' + (this.selfTestMsg || 'none'),
+    ];
+    var pad = 10;
+    var lh = 26;
+    var boxH = lines.length * lh + pad * 2;
+    ctx.fillStyle = 'rgba(0,0,0,.72)';
+    ctx.fillRect(0, this.vh - boxH, this.vw, boxH);
+    ctx.fillStyle = '#7CFFB2';
+    ctx.font = '400 20px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    for (var i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], pad, this.vh - boxH + pad + lh * i + lh / 2);
     }
   };
 
@@ -363,25 +522,50 @@
 
     if (!this.board) return;
 
+    // 过关驶出动画：红车加速冲出画面（0.55s），带一点拖影透明
+    var solvedShift = 0;
+    var solvedAlpha = 1;
+    if (this.state === 'solved') {
+      var target = MG.rush.carById(this.board, this.board.targetId);
+      if (target) {
+        var k = Math.min(this.passT / 0.55, 1);
+        solvedShift = k * k * (MG.rush.SIZE - target.x + 2);
+        solvedAlpha = 1 - Math.max(0, (this.passT - 0.25) / 0.3);
+        if (solvedAlpha < 0) solvedAlpha = 0;
+      }
+    }
+
     // 车辆
     for (var ci = 0; ci < this.board.cars.length; ci++) {
       var car = this.board.cars[ci];
-      var r = this._carRect(car);
+      var vis = this._carVisual(car);
+      if (car.id === this.board.targetId && this.state === 'solved') {
+        vis.gx += solvedShift;
+      }
+      var r = this._carRect(car, vis.gx, vis.gy);
       var isTarget = car.id === this.board.targetId;
       var isHint = this.hint && this.hint.carId === car.id && this.hintT > 0;
 
+      ctx.globalAlpha = isTarget && this.state === 'solved' ? solvedAlpha : 1;
       ctx.fillStyle = isTarget ? C.target : C.carColors[car.id % C.carColors.length];
       roundRect(ctx, r.x, r.y, r.w, r.h, Math.min(r.w, r.h) * 0.28);
+      ctx.fill();
+
+      // 车身高光：顶部一条浅色圆角，增加立体感（静态帧的高级感靠这个）
+      ctx.fillStyle = 'rgba(255,255,255,.22)';
+      roundRect(ctx, r.x + r.w * 0.12, r.y + r.h * 0.14, r.w * 0.76, Math.min(r.h * 0.22, 16), 8);
       ctx.fill();
 
       if (isTarget) {
         ctx.strokeStyle = 'rgba(255,255,255,.9)';
         ctx.lineWidth = 4;
+        roundRect(ctx, r.x, r.y, r.w, r.h, Math.min(r.w, r.h) * 0.28);
         ctx.stroke();
       }
       if (isHint) {
         ctx.strokeStyle = C.accent;
         ctx.lineWidth = 6;
+        roundRect(ctx, r.x, r.y, r.w, r.h, Math.min(r.w, r.h) * 0.28);
         ctx.stroke();
         // 提示箭头
         var ax = this.hint.delta > 0 ? r.x + r.w + 10 : r.x - 34;
@@ -401,6 +585,7 @@
         ctx.closePath();
         ctx.fill();
       }
+      ctx.globalAlpha = 1;
     }
   };
 
@@ -434,18 +619,51 @@
 
   Game.prototype._renderSolved = function (w, h) {
     var ctx = this.ctx;
+    // 面板在红车驶出动画(0.55s)后渐入，不打断高光时刻
+    var appear = (this.passT - 0.5) / 0.3;
+    if (appear <= 0) return;
+    if (appear > 1) appear = 1;
+    ctx.globalAlpha = appear;
     ctx.fillStyle = 'rgba(246,244,238,.94)';
     ctx.fillRect(0, 0, w, h);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+
+    // 星级
+    var starText = '';
+    for (var si = 0; si < 3; si++) starText += si < this.stars ? '★' : '☆';
+    ctx.fillStyle = this.stars >= 3 ? '#F5A623' : C.inkHint;
+    ctx.font = '400 64px sans-serif';
+    ctx.fillText(starText, w / 2, h / 2 - 232);
+
     ctx.fillStyle = C.ink;
     ctx.font = '500 60px sans-serif';
-    ctx.fillText('过关', w / 2, h / 2 - 190);
+    ctx.fillText(this.stars >= 3 ? '完美过关' : '过关', w / 2, h / 2 - 140);
     ctx.fillStyle = C.inkSoft;
     ctx.font = '400 30px sans-serif';
-    ctx.fillText('用了 ' + this.moves + ' 步　最少 ' + this.minSteps + ' 步', w / 2, h / 2 - 118);
-    this._button('下一关', w / 2 - 170, h / 2 - 20, 340, 108, C.btn, C.btnText, this.nextLevel.bind(this));
-    this._button('重玩本关', w / 2 - 170, h / 2 + 116, 340, 96, C.btnGhost, C.btnGhostText, this._restart.bind(this));
+    ctx.fillText('用了 ' + this.moves + ' 步　最少 ' + this.minSteps + ' 步', w / 2, h / 2 - 68);
+
+    this._button('下一关', w / 2 - 170, h / 2 + 10, 340, 108, C.btn, C.btnText, this.nextLevel.bind(this));
+    this._button('分享给好友', w / 2 - 170, h / 2 + 140, 340, 96, C.btnGhost, C.btnGhostText, this._share.bind(this));
+    this._button('重玩本关', 40, h - 150, (w - 120) / 2, 96, 'rgba(0,0,0,0.04)', C.inkHint, this._restart.bind(this));
+    this._button('选关', w - 40 - (w - 120) / 2, h - 150, (w - 120) / 2, 96, 'rgba(0,0,0,0.04)', C.inkHint, this._openLevels.bind(this), this.best > 1);
+    ctx.globalAlpha = 1;
+  };
+
+  Game.prototype._share = function () {
+    this._sfx('btn');
+    this.ad.share({
+      title: '我过了第 ' + this.level + ' 关，你行你也来｜车位脱困',
+    });
+    this._toast('已发起分享');
+  };
+
+  /** 关卡选择：从「最高关」往回一页 20 关，简单可用 */
+  Game.prototype._openLevels = function () {
+    this._sfx('btn');
+    this._toast('最高已到第 ' + this.best + ' 关，继续挑战吧');
+    // 最小实现：直接跳到最高关重玩
+    this.startLevel(Math.max(1, this.best));
   };
 
   Game.prototype._restart = function () {
@@ -468,7 +686,16 @@
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, x + w / 2, y + h / 2);
-    this.btns.push({ x: x, y: y, w: w, h: h, action: action, enabled: on });
+    var self = this;
+    this.btns.push({
+      x: x, y: y, w: w, h: h,
+      action: function () {
+        if (!on) return;
+        self._sfx('btn');
+        action();
+      },
+      enabled: on,
+    });
   };
 
   Game.prototype._toast = function (text) {

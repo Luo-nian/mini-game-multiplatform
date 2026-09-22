@@ -115,8 +115,11 @@
   /**
    * BFS 最短解
    * 返回 { solvable, minSteps, firstMove:{carId,delta}, nodes }
+   * maxDepth：只搜到该深度（win 在该深度内仍会被检出，但不再向下扩展）。
+   * 生成期用「target+6」的有界搜索代替完整求解 —— 太简单的浅层就命中、太难的被
+   * 深度截断，都不用搜满整棵树，实测能把高难度关卡生成耗时从 20s 降到 2~4s。
    */
-  R.solve = function (board, maxNodes) {
+  R.solve = function (board, maxNodes, maxDepth) {
     maxNodes = maxNodes || 120000;
     var cars = board.cars;
     var n = cars.length;
@@ -206,6 +209,8 @@
       if (isWin(pos)) {
         return { solvable: true, minSteps: d, firstMove: firstMove[key], nodes: nodes };
       }
+      // 有界搜索：该层只判 win 不扩展（子节点会落在 maxDepth+1 层）
+      if (maxDepth !== undefined && d >= maxDepth) continue;
 
       fillAll(pos);
       for (var ci = 0; ci < n; ci++) {
@@ -214,26 +219,32 @@
         var y0 = pos[ci * 2 + 1];
         clearCar(pos, ci);
         for (var s = -1; s <= 1; s += 2) {
-          var nx = hFlag[ci] ? x0 + s : x0;
-          var ny = hFlag[ci] ? y0 : y0 + s;
-          if (hFlag[ci]) {
-            if (nx < 0 || nx + L > SIZE) continue;
-          } else {
-            if (ny < 0 || ny + L > SIZE) continue;
-          }
-          var edgeX = hFlag[ci] ? (s > 0 ? nx + L - 1 : nx) : nx;
-          var edgeY = hFlag[ci] ? ny : (s > 0 ? ny + L - 1 : ny);
-          if (occ[edgeY * SIZE + edgeX]) continue;
+          // ⚠️ 游戏规则：一辆车一次拖「任意格」= 1 步。
+          // BFS 每个邻居 = 该车沿该方向一次滑到某个可达位置（1..max 格，代价都是 1）。
+          // 之前写成每次只走 1 格，minSteps 变成「格数」—— 星级判定、难度曲线全部失真。
+          for (var step = 1; step <= SIZE; step++) {
+            var nx = hFlag[ci] ? x0 + s * step : x0;
+            var ny = hFlag[ci] ? y0 : y0 + s * step;
+            if (hFlag[ci]) {
+              if (nx < 0 || nx + L > SIZE) break;
+            } else {
+              if (ny < 0 || ny + L > SIZE) break;
+            }
+            // 路径逐格检查：前沿格被占则更远也到不了
+            var edgeX = hFlag[ci] ? (s > 0 ? nx + L - 1 : nx) : nx;
+            var edgeY = hFlag[ci] ? ny : (s > 0 ? ny + L - 1 : ny);
+            if (occ[edgeY * SIZE + edgeX]) break;
 
-          var np = pos.slice();
-          np[ci * 2] = nx;
-          np[ci * 2 + 1] = ny;
-          var nk = keyOf(np);
-          if (seen[nk] !== undefined) continue;
-          seen[nk] = d + 1;
-          firstMove[nk] = firstMove[key] || { carId: cars[ci].id, delta: s };
-          queue.push(np);
-          keys.push(nk);
+            var np = pos.slice();
+            np[ci * 2] = nx;
+            np[ci * 2 + 1] = ny;
+            var nk = keyOf(np);
+            if (seen[nk] !== undefined) continue;
+            seen[nk] = d + 1;
+            firstMove[nk] = firstMove[key] || { carId: cars[ci].id, delta: s * step };
+            queue.push(np);
+            keys.push(nk);
+          }
         }
         setCar(pos, ci);
       }

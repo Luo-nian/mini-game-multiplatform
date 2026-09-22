@@ -29,6 +29,7 @@ const ENTRY_ORDER = [
   'src/core/rush.js',
   'src/core/game.js',
   'src/config.js',
+  'src/core/selftest.js',
   'src/main.js',
 ];
 
@@ -47,7 +48,22 @@ const projectConfig = (name) => ({
 });
 
 function rmrf(p) {
-  if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+  if (!fs.existsSync(p)) return;
+  try {
+    fs.rmSync(p, { recursive: true, force: true });
+    return;
+  } catch (e) {
+    // 常见原因：微信开发者工具正打开着 dist/wx，目录句柄被占用
+    console.warn(`[warn] 无法整体删除 ${path.relative(ROOT, p)}（多半被开发者工具占用），改为逐项清理`);
+  }
+  for (const name of fs.readdirSync(p)) {
+    const child = path.join(p, name);
+    try {
+      fs.rmSync(child, { recursive: true, force: true });
+    } catch (err) {
+      console.warn(`[warn] 跳过被占用的 ${path.relative(ROOT, child)}（构建继续，可能残留旧文件）`);
+    }
+  }
 }
 
 function copyDir(from, to) {
@@ -91,14 +107,19 @@ function miniGameEntry() {
 function build() {
   rmrf(DIST);
 
+  const sfxDir = path.join(ROOT, 'assets', 'sfx');
+  const hasSfx = fs.existsSync(sfxDir);
+
   // ---- Web ----
   const web = path.join(DIST, 'web');
   copyDir(SRC, path.join(web, 'src'));
+  if (hasSfx) copyDir(sfxDir, path.join(web, 'audio'));
   fs.copyFileSync(path.join(TPL, 'index.html'), path.join(web, 'index.html'));
 
   // ---- 微信小游戏 ----
   const wx = path.join(DIST, 'wx');
   copyDir(SRC, path.join(wx, 'src'));
+  if (hasSfx) copyDir(sfxDir, path.join(wx, 'audio'));
   fs.writeFileSync(path.join(wx, 'game.js'), miniGameEntry());
   fs.writeFileSync(path.join(wx, 'game.json'), JSON.stringify(GAME_JSON, null, 2) + '\n');
   fs.writeFileSync(path.join(wx, 'project.config.json'), JSON.stringify(projectConfig('mini-game-multiplatform-wx'), null, 2) + '\n');
@@ -106,6 +127,7 @@ function build() {
   // ---- 抖音小游戏 ----
   const tt = path.join(DIST, 'tt');
   copyDir(SRC, path.join(tt, 'src'));
+  if (hasSfx) copyDir(sfxDir, path.join(tt, 'audio'));
   fs.writeFileSync(path.join(tt, 'game.js'), miniGameEntry());
   fs.writeFileSync(path.join(tt, 'game.json'), JSON.stringify(GAME_JSON, null, 2) + '\n');
 

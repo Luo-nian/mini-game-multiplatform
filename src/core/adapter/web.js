@@ -14,6 +14,7 @@
 
   api.init = function (opts) {
     opts = opts || {};
+    api._designW = opts.designWidth || 750;
     canvas = opts.canvas || document.getElementById('game');
     if (!canvas) throw new Error('[MG.adapter.web] 找不到 canvas');
     ctx = canvas.getContext('2d');
@@ -45,14 +46,20 @@
   };
 
   api.onPointer = function (handler) {
+    // 暴露给自动化测试用：喂「原生(CSS)坐标」即可，换算在这里完成
+    api._handler = function (native) {
+      var rect = canvas.getBoundingClientRect();
+      var k = (api._designW || 750) / (rect.width || api._info.width || 375);
+      handler({ x: native.x * k, y: native.y * k, type: native.type });
+    };
     function send(e, type) {
       var rect = canvas.getBoundingClientRect();
       var src = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
-      handler({
-        x: (src.clientX != null ? src.clientX : 0) - rect.left,
-        y: (src.clientY != null ? src.clientY : 0) - rect.top,
-        type: type,
-      });
+      var cssX = (src.clientX != null ? src.clientX : 0) - rect.left;
+      var cssY = (src.clientY != null ? src.clientY : 0) - rect.top;
+      // CSS 像素 -> 设计宽虚拟坐标（与 minigame 适配器同一套约定）
+      var k = (api._designW || 750) / (rect.width || api._info.width || 375);
+      handler({ x: cssX * k, y: cssY * k, type: type });
     }
     canvas.addEventListener('touchstart', function (e) {
       e.preventDefault();
@@ -167,6 +174,22 @@
     } catch (e) {}
   };
 
+  // ---------- 音效：Audio 元素池（与 minigame 适配器同一约定） ----------
+  var audioPool = {};
+  api.sfx = function (name) {
+    try {
+      var a = audioPool[name];
+      if (!a) {
+        a = new Audio('audio/' + name + '.wav');
+        a.preload = 'auto';
+        audioPool[name] = a;
+      }
+      a.currentTime = 0;
+      var p = a.play();
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) {}
+  };
+
   api._toast = function (text) {
     var t = document.createElement('div');
     t.textContent = text;
@@ -182,6 +205,23 @@
 
   api.raf = function (fn) {
     return requestAnimationFrame(fn);
+  };
+
+  /** HTTP POST（自测上报用） */
+  api.httpPost = function (url, data) {
+    try {
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(data),
+      }).then(function (r) {
+        return { ok: true, status: r.status };
+      }).catch(function (e) {
+        return { ok: false, reason: String(e) };
+      });
+    } catch (e) {
+      return Promise.resolve({ ok: false, reason: String(e) });
+    }
   };
 
   api.now = function () {

@@ -32,6 +32,7 @@ const rafQueue = [];
 const storageMap = new Map();
 let drawCalls = 0;
 
+const listeners = {};
 const canvas = {
   width: 0,
   height: 0,
@@ -40,9 +41,11 @@ const canvas = {
   getContext() {
     return ctx;
   },
-  addEventListener() {},
+  addEventListener(type, fn) {
+    (listeners[type] || (listeners[type] = [])).push(fn);
+  },
   getBoundingClientRect() {
-    return { left: 0, top: 0 };
+    return { left: 0, top: 0, width: 390, height: 844 };
   },
 };
 const ctx = new Proxy(
@@ -154,7 +157,10 @@ const crafted = {
 };
 const craftedSolve = R.solve(crafted);
 check('构造关卡判定为有解', craftedSolve.solvable === true);
-check('最短步数 = 5（1 步让路 + 4 步出车）', craftedSolve.minSteps === 5, `minSteps=${craftedSolve.minSteps}`);
+// ⚠️ 步数语义：一辆车一次拖「任意格」= 1 步。此局真实最少 2 步
+//（挪开拦路车 1 步 + 红车一次拖到出口 1 步）。
+// 旧版 BFS 每次只走 1 格、把「格数」当步数（记 5），导致星级判定与难度曲线全失真，已修。
+check('最短步数 = 2（真实步数语义：1 步让路 + 1 步出车）', craftedSolve.minSteps === 2, `minSteps=${craftedSolve.minSteps}`);
 const fm = craftedSolve.firstMove;
 const legalFirst = !!fm && ((fm.carId === 1 && fm.delta === -1) || (fm.carId === 0 && fm.delta === 1));
 check('首选走法是合法走法（让路 或 目标车先右移）', legalFirst, fm ? `car=${fm.carId} delta=${fm.delta}` : 'null');
@@ -235,13 +241,28 @@ check('初始状态 = ready', game.state === 'ready', game.state);
 pump(20);
 check('产生绘制调用', drawCalls > 200, `drawCalls=${drawCalls}`);
 
-console.log('\n[6] 游戏层 · 开始与拖拽');
+console.log('\n[6] 游戏层 · 输入链路（原生坐标 -> 虚拟坐标）');
+// 关键：必须经过适配层喂「原生坐标」，才能覆盖坐标换算。
+// 直接调 game.onPointer 喂虚拟坐标等于绕过换算，测了也白测。
+const NATIVE_W = 390;
+const toNative = (vx, vy) => ({ x: (vx * NATIVE_W) / 750, y: (vy * NATIVE_W) / 750 });
+const EVENT_MAP = { down: 'mousedown', move: 'mousemove', up: 'mouseup' };
+
+function dispatch(type, nativeX, nativeY) {
+  const fns = listeners[EVENT_MAP[type]] || [];
+  for (const fn of fns) fn({ clientX: nativeX, clientY: nativeY, buttons: 1 });
+}
+/** 按「虚拟坐标」描述意图，实际派发的是原生坐标，由适配层负责换算 */
+function touchV(vx, vy, type) {
+  const n = toNative(vx, vy);
+  dispatch(type, n.x, n.y);
+}
+
 game.startLevel(1);
 pump(2);
-check('开始后进入 playing', game.state === 'playing', game.state);
-check('棋盘已生成', !!game.board && game.board.cars.length >= 2, `车数=${game.board.cars.length}`);
+check('已进入 playing', game.state === 'playing', game.state);
 
-// 用可控棋盘测拖拽：垂直拦路车被上拖一格
+// 换成可控棋盘：垂直拦路车挡住目标车
 game.board = {
   targetId: 0,
   cars: [
@@ -250,15 +271,28 @@ game.board = {
   ],
 };
 game.moves = 0;
+pump(1);
 const blocker = game.board.cars[1];
 const rc = game._carRect(blocker);
-const cx0 = rc.x + rc.w / 2;
-const cy0 = rc.y + rc.h / 2;
-game.onPointer({ x: cx0, y: cy0, type: 'down' });
-game.onPointer({ x: cx0, y: cy0 - game.cell, type: 'move' });
-game.onPointer({ x: cx0, y: cy0 - game.cell, type: 'up' });
-check('拖拽后拦路车上移一格', blocker.y === 0, `y=${blocker.y}`);
+const mx = rc.x + rc.w / 2;
+const my = rc.y + rc.h / 2;
+
+touchV(mx, my, 'down');
+touchV(mx, my - game.cell, 'move');
+touchV(mx, my - game.cell, 'up');
+check('经适配层拖拽：拦路车上移一格', blocker.y === 0, `y=${blocker.y}`);
 check('一次拖拽计 1 步', game.moves === 1, `moves=${game.moves}`);
+
+// 对照实验：故意把虚拟坐标当原生坐标喂（复现「忘记换算」的 bug）→ 应当点不中
+blocker.y = 1;
+game.moves = 0;
+dispatch('down', mx, my);
+dispatch('up', mx, my);
+check(
+  '对照：不换算坐标时点不中车辆（证明本测试确实覆盖了换算）',
+  blocker.y === 1 && game.moves === 0,
+  `y=${blocker.y} moves=${game.moves}`
+);
 
 console.log('\n[7] 游戏层 · 过关与推进');
 game.board.cars[0].x = 4; // 直接把目标车放到出口

@@ -19,6 +19,7 @@
 
     api.init = function (opts) {
       opts = opts || {};
+      var designW = opts.designWidth || 750;
       // 小游戏第一次 createCanvas() 返回的就是上屏 canvas
       canvas = opts.canvas || host.createCanvas();
       ctx = canvas.getContext('2d');
@@ -26,16 +27,25 @@
       sysInfo = host.getSystemInfoSync ? host.getSystemInfoSync() : {};
       var w = sysInfo.windowWidth || sysInfo.screenWidth || 375;
       var h = sysInfo.windowHeight || sysInfo.screenHeight || 667;
+      var dpr = sysInfo.pixelRatio || 1;
 
-      // 小游戏上屏 canvas 已经是逻辑像素，dpr 固定为 1
+      // 关键：小游戏的上屏 canvas 必须显式设置物理尺寸。
+      // 不设置的话宽高可能是 0 或与逻辑尺寸不一致，结果是「编译不报错但屏幕全白」。
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+
       api._info = {
         width: w,
         height: h,
-        dpr: 1,
+        dpr: dpr,
         platform: name,
         safeTop: (sysInfo.safeArea && sysInfo.safeArea.top) || 0,
         safeBottom: h - ((sysInfo.safeArea && sysInfo.safeArea.bottom) || h),
       };
+
+      // ⚠️ 原生触摸坐标是「逻辑像素」(0..w)，而游戏层一律用「设计宽 designW」的虚拟坐标。
+      // 少了这步换算，界面能正常显示，但点哪都点不中 —— 按钮看着在那儿就是按不动。
+      api._scale = designW / w;
       return api;
     };
 
@@ -51,17 +61,20 @@
       return canvas;
     };
 
-    /** 触摸事件统一成 { x, y, type } */
+    /** 触摸事件统一成 { x, y, type }，坐标已换算到「设计宽」虚拟坐标系 */
     api.onPointer = function (handler) {
+      var k = api._scale || 1;
+      // 暴露给自动化/自测用：喂「原生坐标」即可，换算在这里完成，与真实触摸完全等价
+      api._handler = function (native) {
+        handler({ x: native.x * k, y: native.y * k, type: native.type });
+      };
       function wrap(type) {
         return function (e) {
           var t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
           if (!t) return;
-          handler({
-            x: t.clientX != null ? t.clientX : t.x,
-            y: t.clientY != null ? t.clientY : t.y,
-            type: type,
-          });
+          var rx = t.clientX != null ? t.clientX : t.x;
+          var ry = t.clientY != null ? t.clientY : t.y;
+          handler({ x: rx * k, y: ry * k, type: type });
         };
       }
       if (has(host.onTouchStart)) host.onTouchStart(wrap('down'));
@@ -158,8 +171,49 @@
       } catch (e) {}
     };
 
+    // ---------- 音效：InnerAudioContext 池 ----------
+    // 每个音效一个常驻 context（首次用时懒建），play 前先 stop 回到起点。
+    // 不用每次新建 —— 小游戏里新建 context 带解码延迟，短音效会「点响了半秒后才出声」。
+    var audioPool = {};
+    api.sfx = function (name) {
+      try {
+        var a = audioPool[name];
+        if (!a) {
+          if (!has(host.createInnerAudioContext)) return;
+          a = host.createInnerAudioContext();
+          a.src = 'audio/' + name + '.wav';
+          audioPool[name] = a;
+        }
+        a.stop();
+        a.play();
+      } catch (e) {}
+    };
+
     api.raf = function (fn) {
       return requestAnimationFrame(fn);
+    };
+
+    /** HTTP POST（自测上报用；小游戏走 host.request，需在工具里关闭域名校验） */
+    api.httpPost = function (url, data) {
+      return new Promise(function (resolve) {
+        if (!has(host.request)) {
+          resolve({ ok: false, reason: 'no-request-api' });
+          return;
+        }
+        host.request({
+          url: url,
+          method: 'POST',
+          data: data,
+          timeout: 5000,
+          header: { 'content-type': 'application/json' },
+          success: function (res) {
+            resolve({ ok: true, status: res && res.statusCode });
+          },
+          fail: function (e) {
+            resolve({ ok: false, reason: (e && e.errMsg) || 'fail' });
+          },
+        });
+      });
     };
 
     api.now = function () {

@@ -6,29 +6,44 @@
   var MG = root.MG || (root.MG = {});
 
   function boot() {
-    var ad = MG.adapter.get();
-    ad.init({});
+    try {
+      var ad = MG.adapter.get();
+      console.log('[MG] 平台 = ' + ad.name);
+      ad.init({ designWidth: (MG.config && MG.config.designWidth) || 750 });
 
-    var game = new MG.Game(ad, MG.config);
-    game.mount();
+      var info = ad.getSystemInfo();
+      console.log('[MG] 画布 width=' + info.width + ' height=' + info.height + ' dpr=' + info.dpr);
 
-    ad.onPointer(function (p) {
-      game.onPointer(p);
-    });
+      var game = new MG.Game(ad, MG.config);
+      game.mount();
+      console.log('[MG] 已挂载 虚拟画布 ' + game.vw + 'x' + game.vh.toFixed(0) + ' 格子=' + game.cell.toFixed(1));
 
-    game.loop();
+      ad.onPointer(function (p) {
+        game.onPointer(p);
+      });
 
-    // 便于在开发者工具控制台里调试
-    root.__mg = { adapter: ad, game: game };
-    console.log('[MG] 启动完成 platform=' + ad.name + ' vw=' + game.vw.toFixed(0) + ' vh=' + game.vh.toFixed(0));
+      game.loop();
+
+      // 便于在开发者工具控制台里调试
+      root.__mg = { adapter: ad, game: game };
+
+      // 内置自测（调试期）
+      if (MG.config && MG.config.selfTest && MG.selfTest) {
+        MG.selfTest(ad, game);
+      }
+      console.log('[MG] 启动完成，若画面仍空白请看下面是否有报错');
+    } catch (e) {
+      console.error('[MG] 启动失败：' + (e && e.message) + '\n' + (e && e.stack));
+    }
   }
 
-  if (typeof document !== 'undefined') {
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', boot);
-    } else {
-      boot();
-    }
+  // 只有真浏览器才需要等 DOM ready。
+  // 小游戏环境若被判定成浏览器（某些基础库注入了 document 桩），会永远等不到
+  // DOMContentLoaded 事件，表现就是「编译通过但屏幕全白」。
+  var isBrowser =
+    typeof window !== 'undefined' && typeof document !== 'undefined' && !!document.body;
+  if (isBrowser && document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
   } else {
     boot();
   }
