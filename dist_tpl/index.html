@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>限时点靶｜多端小游戏原型</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #F6F4EE; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #game { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+  @media (min-width: 700px) {
+    #game { width: 420px; height: 860px; max-height: 100vh; box-shadow: 0 2px 24px rgba(0,0,0,.12); border-radius: 18px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<script src="src/core/adapter/index.js"></script>
+<script src="src/core/adapter/minigame.js"></script>
+<script src="src/core/adapter/wx.js"></script>
+<script src="src/core/adapter/tt.js"></script>
+<script src="src/core/adapter/web.js"></script>
+<script src="src/core/game.js"></script>
+<script src="src/config.js"></script>
+<script src="src/main.js"></script>
+</body>
+</html>
