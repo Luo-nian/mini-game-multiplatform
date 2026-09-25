@@ -24,12 +24,16 @@
       if (root.console) console.log('[自测] ' + s);
     }
 
+    /**
+     * 精确定位「开始」按钮。
+     * 以前是按 y 坐标猜（取最靠下的那个），首屏加了「选关」按钮后就会点错对象 ——
+     * 改成按按钮的 kind 字段定位，UI 布局再变也不会点错。
+     */
     function startBtn() {
-      var found = null;
       for (var i = 0; i < game.btns.length; i++) {
-        if (game.btns[i].y < game.vh * 0.8) found = game.btns[i];
+        if (game.btns[i].kind === 'start') return game.btns[i];
       }
-      return found;
+      return null;
     }
 
     /** 注入原生坐标（换算由适配层负责，与真实手指同一条路径） */
@@ -50,6 +54,7 @@
         level: game.level,
         moves: game.moves,
         cars: game.board ? game.board.cars.length : 0,
+        stars: game.stars,
         result: game._result,
         last: game.lastPointer,
         lines: lines,

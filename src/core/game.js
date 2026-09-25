@@ -70,6 +70,12 @@
     this.passT = 0;   // 过关驶出动画进度（秒）
     this.stars = 0;   // 本关星级 1~3
 
+    // 进度与设置
+    this.starMap = {};   // { 关卡号: 星级 }，求和得到总星数
+    this.sfxOn = true;
+    this.page = 0;       // 选关页（每页 30 关）
+    this.levelsPerPage = 30;
+
     // 棋盘几何
     this.margin = 40;
     this.boardX = 40;
@@ -98,6 +104,25 @@
     this.level = isNaN(lv) || lv < 1 ? 1 : lv;
     var bt = parseInt(this.ad.storage.get('mg_best_level', '0'), 10);
     this.best = isNaN(bt) ? 0 : bt;
+    this.sfxOn = this.ad.storage.get('mg_sfx', '1') !== '0';
+    try {
+      this.starMap = JSON.parse(this.ad.storage.get('mg_stars', '{}')) || {};
+    } catch (e) {
+      this.starMap = {};
+    }
+  };
+
+  /** 已获得的总星数 / 满星数 */
+  Game.prototype.totalStars = function () {
+    var n = 0;
+    for (var k in this.starMap) {
+      if (Object.prototype.hasOwnProperty.call(this.starMap, k)) n += this.starMap[k];
+    }
+    return n;
+  };
+
+  Game.prototype.starsOf = function (level) {
+    return this.starMap[level] || 0;
   };
 
   Game.prototype._applyTransform = function () {
@@ -177,8 +202,59 @@
 
   // ---------- 输入 ----------
 
-  /** 音效统一入口（config 可关） */
+  /** 音效统一入口（config 与玩家开关双重控制） */
   Game.prototype._sfx = function (name) {
+    if (this.cfg.sfx === false || !this.sfxOn) return;
+    if (this.ad.sfx) this.ad.sfx(name);
+  };
+
+  /**
+   * 按钮动作分发。
+   * 按钮只登记 {kind, arg}，点击时查表执行 —— 这样渲染每帧重建按钮列表
+   * 不产生任何闭包/新函数，小游戏上避免 GC 抖动（选关页一屏 30 个按钮尤其明显）。
+   */
+  Game.prototype._act = function (kind, arg) {
+    switch (kind) {
+      case 'start':
+        this.startLevel(arg);
+        break;
+      case 'next':
+        this.nextLevel();
+        break;
+      case 'restart':
+        this.startLevel(this.level);
+        break;
+      case 'hint':
+        this.askHint();
+        break;
+      case 'share':
+        this._share();
+        break;
+      case 'levels':
+        this.state = 'levels';
+        this.page = Math.max(0, Math.floor((this.best - 1) / this.levelsPerPage));
+        break;
+      case 'pick':
+        this.startLevel(arg);
+        break;
+      case 'page':
+        this.page = Math.max(0, this.page + arg);
+        break;
+      case 'back':
+        this.state = this.board ? 'playing' : 'ready';
+        break;
+      case 'sfx':
+        this.sfxOn = !this.sfxOn;
+        this.ad.storage.set('mg_sfx', this.sfxOn ? '1' : '0');
+        if (this.sfxOn) this._sfxForce('btn');
+        break;
+      default:
+        break;
+    }
+  };
+
+  /** 忽略开关强制发声（用于「打开音效」时的即时试听） */
+  Game.prototype._sfxForce = function (name) {
     if (this.cfg.sfx === false) return;
     if (this.ad.sfx) this.ad.sfx(name);
   };
@@ -198,12 +274,18 @@
           // 否则它会吃掉落在自己范围内的点击，表现为「点旁边那个能点的按钮却毫无反应」
           if (b.enabled === false) continue;
           this._result = 'hit-btn';
-          if (p.type === 'down') b.action();
+          if (p.type === 'down') {
+            if (b.enabled !== false) this._sfx('btn');
+            this._act(b.kind, b.arg);
+          }
           return;
         }
       }
       this._result = 'miss-btn';
     }
+
+    // 选关页不接受棋盘操作
+    if (this.state === 'levels') return;
 
     if (this.state === 'ready') {
       if (p.type === 'down') this.startLevel(this.level);
@@ -311,6 +393,14 @@
       if (this.moves <= this.minSteps) this.stars = 3;
       else if (this.moves <= this.minSteps + 2) this.stars = 2;
       else this.stars = 1;
+      // 存档只增不减：重玩打出低分不覆盖高分
+      var oldStars = this.starsOf(this.level);
+      if (this.stars > oldStars) {
+        this.starMap[this.level] = this.stars;
+        try {
+          this.ad.storage.set('mg_stars', JSON.stringify(this.starMap));
+        } catch (e) {}
+      }
       this._sfx('pass');
       if (this.stars === 3) this._sfx('star');
       if (this.sinceAd >= 3) {
@@ -398,32 +488,123 @@
     var ctx = this.ctx;
     if (!ctx) return;
     this._applyTransform();
-    this.btns = [];
+    // 复用数组而不是每帧新建（小游戏上减少 GC 抖动）
+    this.btns.length = 0;
     var w = this.vw;
     var h = this.vh;
 
     ctx.fillStyle = C.bg;
     ctx.fillRect(0, 0, w, h);
 
-    this._renderHud(w);
-    this._renderBoard();
-    this._renderFooter(w, h);
+    if (this.state === 'levels') {
+      this._renderLevels(w, h);
+      if (this.toast) this._renderToast(w, h);
+      if (this.cfg.debug) this._renderDebug();
+      return;
+    }
+
+    // 首屏由自己的遮罩层全屏覆盖，HUD 与棋盘不画（否则会从半透明遮罩下透出来）；
+    // 底部操作按钮只在真正能操作时画
+    if (this.state !== 'ready') {
+      this._renderHud(w);
+      this._renderBoard();
+    }
+    if (this.state === 'playing') this._renderFooter(w, h);
 
     if (this.state === 'ready') this._renderReady(w, h);
     if (this.state === 'solved') this._renderSolved(w, h);
 
-    if (this.toast) {
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(38,33,92,.88)';
-      roundRect(ctx, w / 2 - 220, h - 250, 440, 74, 37);
+    if (this.toast) this._renderToast(w, h);
+    if (this.cfg.debug) this._renderDebug();
+  };
+
+  Game.prototype._renderToast = function (w, h) {
+    var ctx = this.ctx;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(38,33,92,.88)';
+    roundRect(ctx, w / 2 - 250, h - 300, 500, 74, 37);
+    ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '400 28px sans-serif';
+    ctx.fillText(this.toast.text, w / 2, h - 263);
+  };
+
+  /** 选关页：每页 30 关（5 列 × 6 行），显示星级与锁定状态 */
+  Game.prototype._renderLevels = function (w, h) {
+    var ctx = this.ctx;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.fillStyle = C.ink;
+    ctx.font = '500 52px sans-serif';
+    ctx.fillText('选择关卡', w / 2, 120);
+    ctx.fillStyle = C.inkHint;
+    ctx.font = '400 26px sans-serif';
+    var total = MG.levels ? MG.levels.length : 0;
+    ctx.fillText(
+      '已通关 ' + this.best + ' 关　★ ' + this.totalStars() + ' / ' + total * 3,
+      w / 2,
+      178
+    );
+
+    var cols = 5;
+    var cellW = (w - 80) / cols;
+    var cellH = 132;
+    var top = 240;
+    var start = this.page * this.levelsPerPage;
+
+    for (var i = 0; i < this.levelsPerPage; i++) {
+      var lv = start + i + 1;
+      if (total && lv > total) break;
+      var cx = 40 + (i % cols) * cellW;
+      var cy = top + Math.floor(i / cols) * cellH;
+      var open = lv <= Math.max(1, this.best);
+      var st = this.starsOf(lv);
+
+      ctx.fillStyle = open ? '#FFFFFF' : 'rgba(0,0,0,0.045)';
+      roundRect(ctx, cx + 6, cy + 6, cellW - 12, cellH - 12, 20);
       ctx.fill();
-      ctx.fillStyle = '#FFFFFF';
-      ctx.font = '400 28px sans-serif';
-      ctx.fillText(this.toast.text, w / 2, h - 213);
+      ctx.strokeStyle = lv === this.level ? C.accent : C.gridLine;
+      ctx.lineWidth = lv === this.level ? 4 : 1;
+      ctx.stroke();
+
+      ctx.fillStyle = open ? C.ink : 'rgba(95,94,90,.4)';
+      ctx.font = '500 40px sans-serif';
+      ctx.fillText(String(lv), cx + cellW / 2, cy + 52);
+
+      if (open) {
+        var s = '';
+        for (var k = 0; k < 3; k++) s += k < st ? '★' : '☆';
+        ctx.fillStyle = st >= 3 ? '#F5A623' : C.inkHint;
+        ctx.font = '400 24px sans-serif';
+        ctx.fillText(s, cx + cellW / 2, cy + 98);
+      } else {
+        ctx.fillStyle = 'rgba(95,94,90,.4)';
+        ctx.font = '400 24px sans-serif';
+        ctx.fillText('锁', cx + cellW / 2, cy + 98);
+      }
+
+      this.btns.push({
+        x: cx + 6, y: cy + 6, w: cellW - 12, h: cellH - 12,
+        kind: 'pick', arg: lv, enabled: open,
+      });
     }
 
-    if (this.cfg.debug) this._renderDebug();
+    var rows = Math.ceil(this.levelsPerPage / cols);
+    var by = top + rows * cellH + 20;
+    var pages = Math.max(1, Math.ceil((total || 30) / this.levelsPerPage));
+    var bw = (w - 120) / 3;
+    this._button('上一页', 40, by, bw, 96, C.btnGhost, C.btnGhostText, 'page', -1, this.page > 0);
+    this._button(
+      (this.page + 1) + ' / ' + pages,
+      40 + bw + 20, by, bw, 96, 'rgba(0,0,0,0.04)', C.inkHint, null, null, false
+    );
+    this._button('下一页', 40 + (bw + 20) * 2, by, bw, 96, C.btnGhost, C.btnGhostText, 'page', 1, this.page < pages - 1);
+    this._button('返回', w / 2 - 170, by + 116, 340, 96, C.btn, C.btnText, 'back');
+
+    // 音效开关放右下角，不占视觉重心
+    this._button(this.sfxOn ? '音效 开' : '音效 关', w - 200, h - 130, 160, 76, 'rgba(0,0,0,0.04)', this.sfxOn ? C.btnGhostText : C.inkHint, 'sfx');
   };
 
   /** 调试层：把关键信息画在屏幕上，替代 Console（真机上也能看） */
@@ -590,12 +771,11 @@
   };
 
   Game.prototype._renderFooter = function (w, h) {
-    var ctx = this.ctx;
     var by = this.boardY + this.boardW + 70;
     var bw = (w - 120) / 2;
 
-    this._button('重开', 40, by, bw, 104, C.btnGhost, C.btnGhostText, this._restart.bind(this), this.state === 'playing');
-    this._button('提示（看广告）', 80 + bw, by, bw, 104, C.btn, C.btnText, this.askHint.bind(this), this.state === 'playing');
+    this._button('重开', 40, by, bw, 104, C.btnGhost, C.btnGhostText, 'restart', null, this.state === 'playing');
+    this._button('提示（看广告）', 80 + bw, by, bw, 104, C.btn, C.btnText, 'hint', null, this.state === 'playing');
   };
 
   Game.prototype._renderReady = function (w, h) {
@@ -606,15 +786,25 @@
     ctx.textBaseline = 'middle';
     ctx.fillStyle = C.ink;
     ctx.font = '500 64px sans-serif';
-    ctx.fillText('车位脱困', w / 2, h / 2 - 200);
+    ctx.fillText('车位脱困', w / 2, h / 2 - 280);
     ctx.fillStyle = C.inkSoft;
     ctx.font = '400 30px sans-serif';
-    ctx.fillText('拖动车辆腾出通道', w / 2, h / 2 - 122);
-    ctx.fillText('把红车从右侧出口开走', w / 2, h / 2 - 74);
+    ctx.fillText('拖动车辆腾出通道', w / 2, h / 2 - 206);
+    ctx.fillText('把红车从右侧出口开走', w / 2, h / 2 - 158);
+
     ctx.fillStyle = C.inkHint;
     ctx.font = '400 26px sans-serif';
-    ctx.fillText('继续第 ' + this.level + ' 关', w / 2, h / 2 - 10);
-    this._button('开始', w / 2 - 170, h / 2 + 50, 340, 108, C.btn, C.btnText, this.startLevel.bind(this, this.level));
+    var total = MG.levels ? MG.levels.length : 0;
+    ctx.fillText(
+      '已通关 ' + this.best + ' 关　★ ' + this.totalStars() + ' / ' + total * 3,
+      w / 2,
+      h / 2 - 92
+    );
+    ctx.fillText('继续第 ' + this.level + ' 关', w / 2, h / 2 - 40);
+
+    this._button('开始', w / 2 - 170, h / 2 + 20, 340, 108, C.btn, C.btnText, 'start', this.level);
+    this._button('选关', w / 2 - 170, h / 2 + 150, 340, 96, C.btnGhost, C.btnGhostText, 'levels', null, this.best > 0);
+    this._button(this.sfxOn ? '音效 开' : '音效 关', w - 200, h - 130, 160, 76, 'rgba(0,0,0,0.04)', this.sfxOn ? C.btnGhostText : C.inkHint, 'sfx');
   };
 
   Game.prototype._renderSolved = function (w, h) {
@@ -643,36 +833,34 @@
     ctx.font = '400 30px sans-serif';
     ctx.fillText('用了 ' + this.moves + ' 步　最少 ' + this.minSteps + ' 步', w / 2, h / 2 - 68);
 
-    this._button('下一关', w / 2 - 170, h / 2 + 10, 340, 108, C.btn, C.btnText, this.nextLevel.bind(this));
-    this._button('分享给好友', w / 2 - 170, h / 2 + 140, 340, 96, C.btnGhost, C.btnGhostText, this._share.bind(this));
-    this._button('重玩本关', 40, h - 150, (w - 120) / 2, 96, 'rgba(0,0,0,0.04)', C.inkHint, this._restart.bind(this));
-    this._button('选关', w - 40 - (w - 120) / 2, h - 150, (w - 120) / 2, 96, 'rgba(0,0,0,0.04)', C.inkHint, this._openLevels.bind(this), this.best > 1);
+    this._button('下一关', w / 2 - 170, h / 2 + 10, 340, 108, C.btn, C.btnText, 'next');
+    this._button('分享给好友', w / 2 - 170, h / 2 + 140, 340, 96, C.btnGhost, C.btnGhostText, 'share');
+    this._button('重玩本关', 40, h - 150, (w - 120) / 2, 96, 'rgba(0,0,0,0.04)', C.inkHint, 'restart');
+    this._button('选关', w - 40 - (w - 120) / 2, h - 150, (w - 120) / 2, 96, 'rgba(0,0,0,0.04)', C.inkHint, 'levels');
     ctx.globalAlpha = 1;
   };
 
   Game.prototype._share = function () {
-    this._sfx('btn');
     this.ad.share({
       title: '我过了第 ' + this.level + ' 关，你行你也来｜车位脱困',
+      // 带上关卡号：好友点开直达同一关，形成可比拼的入口
+      query: 'level=' + this.level,
     });
     this._toast('已发起分享');
-  };
-
-  /** 关卡选择：从「最高关」往回一页 20 关，简单可用 */
-  Game.prototype._openLevels = function () {
-    this._sfx('btn');
-    this._toast('最高已到第 ' + this.best + ' 关，继续挑战吧');
-    // 最小实现：直接跳到最高关重玩
-    this.startLevel(Math.max(1, this.best));
   };
 
   Game.prototype._restart = function () {
     this.startLevel(this.level);
   };
 
-  Game.prototype._button = function (text, x, y, w, h, bg, fg, action, enabled) {
+  /**
+   * 画按钮并登记命中区。
+   * action 用 (kind, arg) 表达而不是函数 —— 渲染每帧重建按钮，用函数就得每帧新建闭包。
+   * kind 为 null 表示纯展示（如页码），不可点。
+   */
+  Game.prototype._button = function (text, x, y, w, h, bg, fg, kind, arg, enabled) {
     var ctx = this.ctx;
-    var on = enabled !== false;
+    var on = enabled !== false && kind !== null && kind !== undefined;
     ctx.fillStyle = bg;
     roundRect(ctx, x, y, w, h, 26);
     ctx.fill();
@@ -686,16 +874,7 @@
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, x + w / 2, y + h / 2);
-    var self = this;
-    this.btns.push({
-      x: x, y: y, w: w, h: h,
-      action: function () {
-        if (!on) return;
-        self._sfx('btn');
-        action();
-      },
-      enabled: on,
-    });
+    this.btns.push({ x: x, y: y, w: w, h: h, kind: kind, arg: arg, enabled: on });
   };
 
   Game.prototype._toast = function (text) {

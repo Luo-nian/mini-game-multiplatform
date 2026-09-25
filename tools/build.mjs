@@ -6,7 +6,8 @@
  *   dist/wx   微信小游戏（用微信开发者工具打开此目录）
  *   dist/tt   抖音小游戏（用抖音开发者工具打开此目录）
  *
- * 用法：node tools/build.mjs
+ * 用法：node tools/build.mjs           （开发构建：保留屏幕调试层与内置自测）
+ *      node tools/build.mjs --release （发布构建：自动剥离调试层与自测上报）
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,6 +18,17 @@ const ROOT = path.resolve(__dirname, '..');
 const SRC = path.join(ROOT, 'src');
 const DIST = path.join(ROOT, 'dist');
 const TPL = path.join(ROOT, 'dist_tpl');
+
+/** 发布构建：关掉屏幕调试层与自测上报（改的是产物，不动 src） */
+const RELEASE = process.argv.includes('--release');
+
+function configSource() {
+  let s = fs.readFileSync(path.join(SRC, 'config.js'), 'utf8');
+  if (RELEASE) {
+    s = s.replace(/debug:\s*true/, 'debug: false').replace(/selfTest:\s*true/, 'selfTest: false');
+  }
+  return s;
+}
 
 // 加载顺序有依赖：adapter 入口 -> 通用工厂 -> 各端实现 -> 游戏逻辑 -> 配置 -> 启动
 const ENTRY_ORDER = [
@@ -114,12 +126,14 @@ function build() {
   const web = path.join(DIST, 'web');
   copyDir(SRC, path.join(web, 'src'));
   if (hasSfx) copyDir(sfxDir, path.join(web, 'audio'));
+  fs.writeFileSync(path.join(web, 'src', 'config.js'), configSource());
   fs.copyFileSync(path.join(TPL, 'index.html'), path.join(web, 'index.html'));
 
   // ---- 微信小游戏 ----
   const wx = path.join(DIST, 'wx');
   copyDir(SRC, path.join(wx, 'src'));
   if (hasSfx) copyDir(sfxDir, path.join(wx, 'audio'));
+  fs.writeFileSync(path.join(wx, 'src', 'config.js'), configSource());
   fs.writeFileSync(path.join(wx, 'game.js'), miniGameEntry());
   fs.writeFileSync(path.join(wx, 'game.json'), JSON.stringify(GAME_JSON, null, 2) + '\n');
   fs.writeFileSync(path.join(wx, 'project.config.json'), JSON.stringify(projectConfig('mini-game-multiplatform-wx'), null, 2) + '\n');
@@ -128,11 +142,12 @@ function build() {
   const tt = path.join(DIST, 'tt');
   copyDir(SRC, path.join(tt, 'src'));
   if (hasSfx) copyDir(sfxDir, path.join(tt, 'audio'));
+  fs.writeFileSync(path.join(tt, 'src', 'config.js'), configSource());
   fs.writeFileSync(path.join(tt, 'game.js'), miniGameEntry());
   fs.writeFileSync(path.join(tt, 'game.json'), JSON.stringify(GAME_JSON, null, 2) + '\n');
 
   // ---- 报告 ----
-  console.log('\n构建完成\n');
+  console.log(`\n构建完成（${RELEASE ? '发布模式：调试层已剥离' : '开发模式：含屏幕调试层'}）\n`);
   const rows = [];
   for (const name of ['web', 'wx', 'tt']) {
     const r = sizeOf(path.join(DIST, name));

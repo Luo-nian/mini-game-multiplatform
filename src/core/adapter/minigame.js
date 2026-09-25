@@ -105,10 +105,46 @@
       opts = opts || {};
       try {
         if (has(host.shareAppMessage)) {
-          host.shareAppMessage({ title: opts.title || '', imageUrl: opts.imageUrl || '' });
+          var msg = { title: opts.title || '' };
+          if (opts.imageUrl) msg.imageUrl = opts.imageUrl;
+          if (opts.query) msg.query = opts.query;
+          host.shareAppMessage(msg);
         }
         if (has(host.showShareMenu)) host.showShareMenu({ withShareTicket: false });
       } catch (e) {}
+    };
+
+    /**
+     * 注册「右上角转发」的内容。
+     * 小游戏里玩家从菜单栏转发不会走 share()，必须用 onShareAppMessage 提供内容，
+     * 否则转发出去的卡片没有关卡参数 —— 裂变链条就断了。
+     */
+    api.setupShare = function (opts) {
+      opts = opts || {};
+      try {
+        if (has(host.showShareMenu)) host.showShareMenu({ withShareTicket: false });
+        if (has(host.onShareAppMessage)) {
+          host.onShareAppMessage(function () {
+            return {
+              title: opts.title || '',
+              path: opts.path || '',
+              query: opts.query || '',
+              imageUrl: opts.imageUrl || '',
+            };
+          });
+        }
+      } catch (e) {}
+    };
+
+    /** 启动参数（分享链接里的 level=xx 靠这个取到） */
+    api.getLaunchQuery = function () {
+      try {
+        if (has(host.getLaunchOptionsSync)) {
+          var o = host.getLaunchOptionsSync();
+          return (o && o.query) || {};
+        }
+      } catch (e) {}
+      return {};
     };
 
     /**

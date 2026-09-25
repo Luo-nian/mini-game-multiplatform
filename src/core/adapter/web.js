@@ -26,8 +26,12 @@
   api._resize = function () {
     if (!canvas) return;
     var dpr = Math.min(window.devicePixelRatio || 1, 2);
-    var w = canvas.clientWidth || window.innerWidth;
-    var h = canvas.clientHeight || window.innerHeight;
+    // ⚠️ 尺寸一律以「元素实际显示尺寸」为准（canvas.clientWidth），不要用 window.innerWidth：
+    //   页面的 CSS 可能把画布固定成手机比例（见 index.html 的 @media），
+    //   若按窗口宽布局，画面会被放大错位/裁切。
+    // 这里也**不要**写 canvas.style —— CSS 是尺寸的唯一来源，内联会覆盖掉媒体查询。
+    var w = canvas.clientWidth || window.innerWidth || 375;
+    var h = canvas.clientHeight || window.innerHeight || 667;
     canvas.width = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
     api._info = { width: w, height: h, dpr: dpr, platform: 'web', safeTop: 0, safeBottom: 0 };
@@ -104,6 +108,10 @@
   api.share = function (opts) {
     opts = opts || {};
     var url = opts.url || window.location.href;
+    if (opts.query) {
+      var q = String(opts.query);
+      url += (url.indexOf('?') >= 0 ? '&' : '?') + q;
+    }
     try {
       if (navigator.share) {
         navigator.share({ title: opts.title || document.title, url: url });
@@ -114,6 +122,29 @@
         api._toast('链接已复制');
       }
     } catch (e) {}
+  };
+
+  /** 浏览器版没有系统转发菜单，这里留空实现保证接口一致 */
+  api.setupShare = function () {
+    try {
+      if (document && document.title) document.title = document.title;
+    } catch (e) {}
+  };
+
+  /** 启动参数：从 URL query 里取（如 ?level=37） */
+  api.getLaunchQuery = function () {
+    try {
+      var out = {};
+      var s = window.location.search.replace(/^\?/, '');
+      if (!s) return out;
+      s.split('&').forEach(function (kv) {
+        var i = kv.indexOf('=');
+        if (i > 0) out[decodeURIComponent(kv.slice(0, i))] = decodeURIComponent(kv.slice(i + 1));
+      });
+      return out;
+    } catch (e) {
+      return {};
+    }
   };
 
   function overlay(seconds, label, skippable) {

@@ -20,12 +20,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const NODE = process.execPath;
 
-const TOTAL = Number(process.argv[2] || 200);
+const TOTAL = Number(process.argv[2] || 300);
 const WORKERS = Math.max(1, Number(process.argv[3] || 8));
 
 /** 难度曲线：目标最少步数（分段线性插值，真实步数语义） */
 const CURVE = [
-  [7, 2], [20, 3], [40, 5], [70, 6], [100, 7], [130, 8], [160, 9], [200, 10],
+  [7, 2], [20, 3], [40, 5], [70, 6], [100, 7], [130, 8], [160, 9], [200, 10], [300, 11],
 ];
 function targetSteps(lv) {
   if (lv <= CURVE[0][0]) return CURVE[0][1];
@@ -138,7 +138,8 @@ function loadRush() {
 }
 
 async function runWorkers() {
-  const perWorker = Math.ceil(8400 / WORKERS);
+  // 撒量按关卡数缩放：高段（9~11 步）占比约 2~3%，需要足够多次采样才能凑齐
+  const perWorker = Math.ceil((TOTAL * 45) / WORKERS);
   const t0 = Date.now();
   console.log(`并行生成池：${WORKERS} worker × ${perWorker} 棋盘`);
   const procs = [];

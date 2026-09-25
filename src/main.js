@@ -18,6 +18,29 @@
       game.mount();
       console.log('[MG] 已挂载 虚拟画布 ' + game.vw + 'x' + game.vh.toFixed(0) + ' 格子=' + game.cell.toFixed(1));
 
+      // 分享链接带 level 参数时直达该关（好友点开就能玩同一关）
+      try {
+        var q = ad.getLaunchQuery ? ad.getLaunchQuery() : {};
+        var shareLevel = parseInt(q && q.level, 10);
+        if (!isNaN(shareLevel) && shareLevel >= 1) {
+          game.startLevel(shareLevel);
+          game._toast('好友邀请你挑战第 ' + shareLevel + ' 关');
+          console.log('[MG] 来自分享，直达第 ' + shareLevel + ' 关');
+        } else if (q && q.screen === 'levels') {
+          game.state = 'levels';
+          game.page = 0;
+          console.log('[MG] 深链直达选关页');
+        }
+      } catch (e) {}
+
+      // 转发卡片内容跟随当前关卡（小游戏菜单栏转发也要带上参数）
+      if (ad.setupShare) {
+        ad.setupShare({
+          title: '车位脱困｜拖开挡路的车，把红车开出去',
+          query: 'level=' + game.level,
+        });
+      }
+
       ad.onPointer(function (p) {
         game.onPointer(p);
       });

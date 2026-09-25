@@ -210,10 +210,27 @@ const highMs = Date.now() - tHigh;
 console.log(
   `        生成器速度：低关卡 ${(genMs / SAMPLE).toFixed(0)}ms/关，高关卡 ${highMs}ms/关 —— 所以运行时改读离线关卡表`
 );
-const lv1 = R.generate(1);
-const lv30 = R.generate(30);
-check('第 1 关车辆数少（新手友好）', lv1.board.cars.length <= 6, `车=${lv1.board.cars.length}`);
-check('第 30 关车辆数更多（难度递增）', lv30.board.cars.length > lv1.board.cars.length, `${lv1.board.cars.length} -> ${lv30.board.cars.length}`);
+// 难度递增由「关卡表曲线」保证（见 tools/genlevels.mjs），不再由运行时 generate 保证 ——
+// generate 现在只做关卡表之外的兜底（固定 11 车 / 目标 11 步）。
+const lv1 = R.getLevel(1);
+const lv30 = R.getLevel(30);
+const lvLate = R.getLevel(Math.min(200, MG.levels.length));
+check('第 1 关车辆数少（新手友好）', lv1.board.cars.length <= 4, `车=${lv1.board.cars.length}`);
+check('第 30 关车辆数更多（递增）', lv30.board.cars.length > lv1.board.cars.length, `${lv1.board.cars.length} -> ${lv30.board.cars.length}`);
+check(
+  '后期关卡最少步数显著高于前期（曲线确实递增）',
+  lvLate.minSteps > lv30.minSteps + 3,
+  `第30关 ${lv30.minSteps} 步 -> 第${Math.min(200, MG.levels.length)}关 ${lvLate.minSteps} 步`
+);
+check(
+  '表外关卡走兜底生成器且保证有解',
+  (() => {
+    const g = R.generate(9999);
+    return R.solve(g.board, 120000).solvable;
+  })(),
+  'generate(9999)'
+);
+check('关卡表每关都标记了最少步数', MG.levels.every((x) => x.m >= 1), `共 ${MG.levels.length} 关`);
 
 console.log('\n[4b] 关卡表（离线预生成，运行时零计算）');
 check('关卡表已加载', Array.isArray(MG.levels) && MG.levels.length > 0, `${MG.levels ? MG.levels.length : 0} 关`);

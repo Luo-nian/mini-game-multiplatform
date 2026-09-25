@@ -260,18 +260,19 @@
   };
 
   /**
-   * 程序化生成关卡
-   * 难度随 level 缓升；生成后必须过求解器，保证有解。
-   * 若多次尝试都没达到目标难度，就返回已找到的最难的一关（宁可简单，绝不给无解）。
+   * 程序化生成关卡（**仅用于关卡表之外的兜底**，正常路径走 R.getLevel 读表）
+   * 难度对齐曲线末端（11 车 / 目标 11 步）；多次采样取「最接近目标」的一版，
+   * 实在达不到就返回已找到的（宁可简单，绝不给无解）。
    */
   R.generate = function (level, seed) {
     var rng = R.makeRng((seed || 12345) + level * 7919);
-    var wantCars = Math.min(4 + Math.floor((level - 1) / 4), 10);
-    var wantMin = Math.min(1 + Math.floor((level - 1) / 4), 10);
+    var wantCars = 11;
+    var wantMin = 11;
 
     var best = null;
+    var bestScore = Infinity;
 
-    for (var attempt = 0; attempt < 40; attempt++) {
+    for (var attempt = 0; attempt < 60; attempt++) {
       var cars = [{ id: 0, x: 0, y: EXIT_ROW, len: 2, dir: 'h' }];
       var used = [];
       for (var y = 0; y < SIZE; y++) used.push([0, 0, 0, 0, 0, 0]);
@@ -280,9 +281,9 @@
 
       var id = 1;
       var guard = 0;
-      while (cars.length < wantCars && guard < 300) {
+      while (cars.length < wantCars && guard < 400) {
         guard += 1;
-        var len = rng() < 0.72 ? 2 : 3;
+        var len = rng() < 0.7 ? 2 : 3;
         var dir = rng() < 0.5 ? 'h' : 'v';
         var maxX = dir === 'h' ? SIZE - len : SIZE - 1;
         var maxY = dir === 'v' ? SIZE - len : SIZE - 1;
@@ -308,12 +309,16 @@
 
       var board = { targetId: 0, cars: cars };
       if (R.isSolved(board)) continue;
-      var res = R.solve(board, 30000);
+      // 有界搜索：目标 11 步，深度 17 足够（与生成器同一策略）
+      var res = R.solve(board, 120000, 17);
       if (!res.solvable) continue;
-      if (res.minSteps >= wantMin) {
-        return { board: board, minSteps: res.minSteps, level: level };
+      var diff = res.minSteps - wantMin;
+      var score = diff >= 0 ? diff : -diff * 2.5;
+      if (score < bestScore) {
+        bestScore = score;
+        best = { board: board, minSteps: res.minSteps };
       }
-      if (!best || res.minSteps > best.minSteps) best = { board: board, minSteps: res.minSteps };
+      if (Math.abs(diff) <= 1) break;
     }
 
     if (best) return { board: best.board, minSteps: best.minSteps, level: level };
